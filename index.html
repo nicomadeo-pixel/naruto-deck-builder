@@ -1,0 +1,220 @@
+/* ═══════════════════════════════════════════════════════════════════
+   HOVER CARD PREVIEW — app additions
+   Drop this block at the END of app.js, before the final renderGrid()/renderDeck() calls.
+   ═══════════════════════════════════════════════════════════════════ */
+
+// ── Hover Preview ────────────────────────────────────────────────────────────
+
+(function initHoverPreview() {
+  // Don't run on touch/coarse-pointer devices
+  if (window.matchMedia('(hover: none), (pointer: coarse)').matches) return;
+
+  const PREVIEW_WIDTH  = 288;  // matches CSS .card-hover-preview width + border
+  const PREVIEW_OFFSET = 12;   // gap between card thumb and preview
+  const HIDE_DELAY_MS  = 80;   // short grace period to move mouse into preview
+
+  let preview    = null;
+  let hideTimer  = null;
+  let activeCard = null;
+
+  // ── Build the singleton preview element ──────────────────────────────────
+  function createPreview() {
+    const el = document.createElement('div');
+    el.className = 'card-hover-preview';
+    el.setAttribute('role', 'tooltip');
+    el.setAttribute('aria-live', 'polite');
+    el.innerHTML = `
+      <div class="chp-image-wrap">
+        <img class="chp-img" src="" alt="" />
+        <span class="chp-rarity-dot"></span>
+        <span class="chp-copies-badge" hidden></span>
+      </div>
+      <div class="chp-info">
+        <div class="chp-name"></div>
+        <div class="chp-version"></div>
+        <div class="chp-stats"></div>
+        <p class="chp-effect"></p>
+        <div class="chp-actions">
+          <button class="chp-add-btn" type="button">+ Add to Deck</button>
+          <span class="chp-limit-label"></span>
+        </div>
+        <div class="chp-faction"></div>
+      </div>`;
+    document.body.appendChild(el);
+
+    // Hovering over the preview itself keeps it open
+    el.addEventListener('mouseenter', () => clearHideTimer());
+    el.addEventListener('mouseleave', () => scheduleHide());
+
+    // Wire up the Add button
+    el.querySelector('.chp-add-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (activeCard) {
+        addToDeck(activeCard);
+        refreshPreviewState(); // update button/badge after adding
+      }
+    });
+
+    return el;
+  }
+
+  // ── Populate preview with card data ──────────────────────────────────────
+  function populatePreview(card) {
+    const img       = preview.querySelector('.chp-img');
+    const rarityDot = preview.querySelector('.chp-rarity-dot');
+    const badge     = preview.querySelector('.chp-copies-badge');
+    const name      = preview.querySelector('.chp-name');
+    const version   = preview.querySelector('.chp-version');
+    const stats     = preview.querySelector('.chp-stats');
+    const effect    = preview.querySelector('.chp-effect');
+    const faction   = preview.querySelector('.chp-faction');
+
+    img.src = card.image;
+    img.alt = card.name;
+
+    rarityDot.className = `chp-rarity-dot ${card.rarity}`;
+
+    name.textContent    = card.name;
+    version.textContent = card.version || (card.type === 'mission' ? 'Mission Card' : '');
+
+    // Stats pills — reuse existing helper markup
+    stats.innerHTML = '';
+    if (card.type === 'character') {
+      if (card.chakraCost != null)
+        stats.innerHTML += `<span class="stat-pill chakra">⚡${card.chakraCost}</span>`;
+      if (card.power != null)
+        stats.innerHTML += `<span class="stat-pill power">☆${card.power}</span>`;
+      if (card.faction)
+        stats.innerHTML += `<span class="stat-pill">${card.faction}</span>`;
+    } else {
+      if (card.missionPoints != null)
+        stats.innerHTML += `<span class="stat-pill pts">☆${card.missionPoints} pts</span>`;
+    }
+
+    effect.textContent  = card.effect || '';
+    faction.textContent = card.faction ? card.faction.toUpperCase() : '';
+
+    refreshPreviewState();
+  }
+
+  // ── Refresh the add button & copies badge (call after deck changes) ───────
+  function refreshPreviewState() {
+    if (!activeCard || !preview) return;
+
+    const badge      = preview.querySelector('.chp-copies-badge');
+    const addBtn     = preview.querySelector('.chp-add-btn');
+    const limitLabel = preview.querySelector('.chp-limit-label');
+    const copies     = copiesInDeck(activeCard.number);
+
+    // Copies badge on the image
+    if (copies > 0) {
+      badge.hidden      = false;
+      badge.textContent = `×${copies} in deck`;
+    } else {
+      badge.hidden = true;
+    }
+
+    if (activeCard.type === 'mission') {
+      const already = deck.missions.find(e => e.card.number === activeCard.number);
+      const full    = deck.missions.length >= MAX_MISSIONS;
+      addBtn.disabled     = !!(already || full);
+      addBtn.textContent  = already ? '✔ In Missions' : '+ Add to Missions';
+      limitLabel.textContent = `${deck.missions.length}/${MAX_MISSIONS} missions`;
+    } else {
+      const atCopyLimit = copies >= MAX_COPIES;
+      const atDeckLimit = charTotal() >= MAX_CHAR_DECK;
+      addBtn.disabled    = atCopyLimit || atDeckLimit;
+      addBtn.textContent = copies > 0 ? `+ Add (×${copies} in deck)` : '+ Add to Deck';
+      limitLabel.textContent = `${copies}/${MAX_COPIES} copies · ${charTotal()}/${MAX_CHAR_DECK} total`;
+    }
+  }
+
+  // ── Position logic — flip if near viewport edge ───────────────────────────
+  function positionPreview(thumbRect) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    let left = thumbRect.right + PREVIEW_OFFSET;
+    let top  = thumbRect.top;
+
+    // Flip to left if overflows right edge
+    if (left + PREVIEW_WIDTH > vw - 8) {
+      left = thumbRect.left - PREVIEW_WIDTH - PREVIEW_OFFSET;
+    }
+
+    // Clamp vertical — never overflow bottom
+    const previewH = preview.offsetHeight || 480;
+    if (top + previewH > vh - 8) {
+      top = Math.max(8, vh - previewH - 8);
+    }
+
+    // Never overflow top
+    if (top < 8) top = 8;
+
+    preview.style.left = `${left}px`;
+    preview.style.top  = `${top}px`;
+  }
+
+  // ── Show / hide ───────────────────────────────────────────────────────────
+  function showPreview(card, thumbEl) {
+    clearHideTimer();
+    activeCard = card;
+
+    if (!preview) preview = createPreview();
+
+    populatePreview(card);
+    preview.classList.remove('visible');
+
+    // Position before making visible so we can read offsetHeight
+    const rect = thumbEl.getBoundingClientRect();
+    preview.style.left = `${rect.right + PREVIEW_OFFSET}px`;
+    preview.style.top  = `${rect.top}px`;
+
+    // Trigger reflow then animate in
+    requestAnimationFrame(() => {
+      positionPreview(rect);
+      preview.classList.add('visible');
+    });
+  }
+
+  function scheduleHide() {
+    clearHideTimer();
+    hideTimer = setTimeout(() => {
+      if (preview) preview.classList.remove('visible');
+      activeCard = null;
+    }, HIDE_DELAY_MS);
+  }
+
+  function clearHideTimer() {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+  }
+
+  // ── Delegate hover events on the card grid ────────────────────────────────
+  cardGrid.addEventListener('mouseenter', (e) => {
+    const thumb = e.target.closest('.card-thumb');
+    if (!thumb) return;
+    const card = CARDS.find(c => c.id === thumb.dataset.id);
+    if (card) showPreview(card, thumb);
+  }, true);
+
+  cardGrid.addEventListener('mouseleave', (e) => {
+    const thumb = e.target.closest('.card-thumb');
+    if (!thumb) return;
+    // Only schedule hide if not moving into the preview
+    scheduleHide();
+  }, true);
+
+  // Keep preview state fresh after any deck mutation
+  // Patch renderDeck to also refresh the hover preview
+  const _origRenderDeck = renderDeck;
+  window.renderDeck = function() {
+    _origRenderDeck();
+    if (activeCard && preview && preview.classList.contains('visible')) {
+      refreshPreviewState();
+    }
+  };
+
+})();
